@@ -1,12 +1,14 @@
 from __future__ import unicode_literals
 
-from six import add_metaclass
+from six import with_metaclass
 
 from django.forms.models import (
     BaseModelFormSet, modelformset_factory,
     ModelForm, _get_foreign_key, ModelFormMetaclass, ModelFormOptions
 )
 from django.db.models.fields.related import RelatedObject
+
+from modelcluster.models import get_all_child_relations
 
 
 class BaseTransientModelFormSet(BaseModelFormSet):
@@ -183,17 +185,8 @@ class ClusterFormMetaclass(ModelFormMetaclass):
         # replace that with ClusterFormOptions so that we can access _meta.formsets
         opts = new_class._meta = ClusterFormOptions(getattr(new_class, 'Meta', None))
         if opts.model:
-            child_relations = []
-
-            for model in {opts.model} | opts.model._meta.get_parent_list():
-                if not model._meta.abstract:
-                    try:
-                        child_relations.extend(model._meta.child_relations)
-                    except AttributeError:
-                        pass
-
             formsets = {}
-            for rel in child_relations:
+            for rel in get_all_child_relations(opts.model):
                 # to build a childformset class from this relation, we need to specify:
                 # - the base model (opts.model)
                 # - the child model (rel.model)
@@ -233,8 +226,7 @@ class ClusterFormMetaclass(ModelFormMetaclass):
         return new_class
 
 
-@add_metaclass(ClusterFormMetaclass)
-class ClusterForm(ModelForm):
+class ClusterForm(with_metaclass(ClusterFormMetaclass, ModelForm)):
     def __init__(self, data=None, files=None, instance=None, prefix=None, **kwargs):
         super(ClusterForm, self).__init__(data, files, instance=instance, prefix=prefix, **kwargs)
 

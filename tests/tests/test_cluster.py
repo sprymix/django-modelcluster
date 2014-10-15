@@ -1,9 +1,20 @@
 from __future__ import unicode_literals
 
+import django
 from django.test import TestCase
 from django.db import IntegrityError
 
-from tests.models import Band, BandMember
+from tests.models import Band, BandMember, Restaurant, Review
+
+# make sure that we're using the same unittest library that Django uses internally
+try:
+    # Firstly, try to import unittest from Django
+    from django.utils import unittest
+except ImportError:
+    # Django doesn't include unittest
+    # We must be running on Django 1.7+ which doesn't support Python 2.6 so
+    # the standard unittest library should be unittest2
+    import unittest
 
 class ClusterTest(TestCase):
     def test_can_create_cluster(self):
@@ -91,6 +102,21 @@ class ClusterTest(TestCase):
         self.assertEqual(2, beatles.members.count())
         self.assertEqual(beatles, beatles.members.all()[0].band)
 
+    def test_can_access_child_relations_of_superclass(self):
+        fat_duck = Restaurant(name='The Fat Duck', serves_hot_dogs=False, reviews=[
+            Review(author='Michael Winner', body='Rubbish.')
+        ])
+        self.assertEqual(1, fat_duck.reviews.count())
+        self.assertEqual(fat_duck.reviews.first().author, 'Michael Winner')
+        self.assertEqual(fat_duck, fat_duck.reviews.all()[0].place)
+
+        fat_duck.save()
+        # ensure relations have been saved to the database
+        fat_duck = Restaurant.objects.get(id=fat_duck.id)
+        self.assertEqual(1, fat_duck.reviews.count())
+        self.assertEqual(fat_duck.reviews.first().author, 'Michael Winner')
+
+
     def test_can_only_commit_on_saved_parent(self):
         beatles = Band(name='The Beatles', members=[
             BandMember(name='John Lennon'),
@@ -133,4 +159,21 @@ class ClusterTest(TestCase):
         with self.assertNumQueries(2):
             lists = [list(band.members.all()) for band in Band.objects.prefetch_related('members')]
         normal_lists = [list(band.members.all()) for band in Band.objects.all()]
+        self.assertEqual(lists, normal_lists)
+
+    @unittest.skipIf(django.VERSION < (1, 7), "Custom querysets on prefetch_related are only available in Django 1.7 and later")
+    def test_prefetch_related_with_custom_queryset(self):
+        from django.db.models import Prefetch
+        Band.objects.create(name='The Beatles', members=[
+            BandMember(id=1, name='John Lennon'),
+            BandMember(id=2, name='Paul McCartney'),
+        ])
+        with self.assertNumQueries(2):
+            lists = [
+                list(band.members.all())
+                for band in Band.objects.prefetch_related(
+                    Prefetch('members', queryset=BandMember.objects.filter(name__startswith='Paul'))
+                )
+            ]
+        normal_lists = [list(band.members.filter(name__startswith='Paul')) for band in Band.objects.all()]
         self.assertEqual(lists, normal_lists)

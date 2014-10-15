@@ -49,14 +49,14 @@ class TaggedPlace(TaggedItemBase):
 @python_2_unicode_compatible
 class Place(ClusterableModel):
     name = models.CharField(max_length=255)
-    tags = ClusterTaggableManager(through=TaggedPlace)
+    tags = ClusterTaggableManager(through=TaggedPlace, blank=True)
 
     def __str__(self):
         return self.name
 
 
 class Restaurant(Place):
-    serves_hot_dogs = models.BooleanField()
+    serves_hot_dogs = models.BooleanField(default=False)
     proprietor = models.ForeignKey('Chef', null=True, blank=True, on_delete=models.SET_NULL, related_name='restaurants')
 
 @python_2_unicode_compatible
@@ -89,3 +89,21 @@ class MenuItem(models.Model):
 
     def __str__(self):
         return "%s - %f" % (self.dish, self.price)
+
+@python_2_unicode_compatible
+class Review(models.Model):
+    place = ParentalKey('Place', related_name='reviews')
+    author = models.CharField(max_length=255)
+    body = models.TextField()
+
+    def __str__(self):
+        return "%s on %s" % (self.author, self.place.name)
+
+
+@python_2_unicode_compatible
+class Log(ClusterableModel):
+    time = models.DateTimeField(blank=True, null=True)
+    data = models.CharField(max_length=255)
+
+    def __str__(self):
+        return "[%s] %s" % (self.time.isoformat(), self.data)

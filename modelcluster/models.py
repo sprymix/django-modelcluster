@@ -1,16 +1,29 @@
 from __future__ import unicode_literals
 
+import json
+import datetime
+
 from django.db import models
 from django.db.models.fields import FieldDoesNotExist
 from django.utils.encoding import is_protected_type
 from django.core.serializers.json import DjangoJSONEncoder
-
-import json
+from django.conf import settings
+from django.utils import timezone
 
 
 def get_field_value(field, model):
     if field.rel is None:
         value = field._get_val_from_obj(model)
+
+        # Make datetimes timezone aware
+        # https://github.com/django/django/blob/master/django/db/models/fields/__init__.py#L1394-L1403
+        if isinstance(value, datetime.datetime) and settings.USE_TZ:
+            if timezone.is_naive(value):
+                default_timezone = timezone.get_default_timezone()
+                value = timezone.make_aware(value, default_timezone).astimezone(timezone.utc)
+            # convert to UTC
+            value = timezone.localtime(value, timezone.utc)
+
         if is_protected_type(value):
             return value
         else:
@@ -71,7 +84,17 @@ def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
                         else:
                             raise Exception("can't currently handle on_delete types other than CASCADE, SET_NULL and DO_NOTHING")
         else:
-            kwargs[field.name] = field.to_python(field_value)
+            value = field.to_python(field_value)
+
+            # Make sure datetimes are converted to localtime
+            if isinstance(field, models.DateTimeField) and settings.USE_TZ and value is not None:
+                default_timezone = timezone.get_default_timezone()
+                if timezone.is_aware(value):
+                    value = timezone.localtime(value, default_timezone)
+                else:
+                    value = timezone.make_aware(value, default_timezone)
+
+            kwargs[field.name] = value
 
     obj = model(**kwargs)
 
@@ -83,16 +106,37 @@ def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
     return obj
 
 
+def get_all_child_relations(model):
+    """
+    Return a list of RelatedObject records for child relations of the given model,
+    including ones attached to ancestors of the model
+    """
+    try:
+        return model._meta._child_relations_cache
+    except AttributeError:
+        relations = []
+        for parent in model._meta.get_parent_list():
+            try:
+                relations.extend(parent._meta.child_relations)
+            except AttributeError:
+                pass
+
+        try:
+            relations.extend(model._meta.child_relations)
+        except AttributeError:
+            pass
+
+        model._meta._child_relations_cache = relations
+        return relations
+
+
 class ClusterableModel(models.Model):
     def __init__(self, *args, **kwargs):
         """
         Extend the standard model constructor to allow child object lists to be passed in
         via kwargs
         """
-        try:
-            child_relation_names = [rel.get_accessor_name() for rel in self._meta.child_relations]
-        except AttributeError:
-            child_relation_names = []
+        child_relation_names = [rel.get_accessor_name() for rel in get_all_child_relations(self)]
 
         is_passing_child_relations = False
         for rel_name in child_relation_names:
@@ -117,10 +161,7 @@ class ClusterableModel(models.Model):
         """
         Save the model and commit all child relations.
         """
-        try:
-            child_relation_names = [rel.get_accessor_name() for rel in self._meta.child_relations]
-        except AttributeError:
-            child_relation_names = []
+        child_relation_names = [rel.get_accessor_name() for rel in get_all_child_relations(self)]
 
         update_fields = kwargs.pop('update_fields', None)
         if update_fields is None:
@@ -142,11 +183,7 @@ class ClusterableModel(models.Model):
 
     def serializable_data(self):
         obj = get_serializable_data_for_fields(self)
-
-        try:
-            child_relations = self._meta.child_relations
-        except AttributeError:
-            child_relations = []
+        child_relations = get_all_child_relations(self)
 
         for rel in child_relations:
             rel_name = rel.get_accessor_name()
@@ -179,10 +216,7 @@ class ClusterableModel(models.Model):
         if obj is None:
             return None
 
-        try:
-            child_relations = cls._meta.child_relations
-        except AttributeError:
-            child_relations = []
+        child_relations = get_all_child_relations(cls)
 
         for rel in child_relations:
             rel_name = rel.get_accessor_name()

@@ -1,9 +1,12 @@
 from __future__ import unicode_literals
 
+from six import text_type
+
 from django.test import TestCase
-from tests.models import Band, BandMember, Album
+from tests.models import Band, BandMember, Album, Restaurant
 from modelcluster.forms import ClusterForm
 from django.forms import Textarea, CharField
+from django.forms.widgets import TextInput
 
 import datetime
 
@@ -13,6 +16,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         self.assertTrue(BandForm.formsets)
 
@@ -30,6 +34,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         form = BandForm()
         self.assertEqual(3, len(form.formsets['members'].forms))
@@ -38,6 +43,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         beatles = Band(name='The Beatles', members=[
             BandMember(name='George Harrison'),
@@ -87,6 +93,7 @@ class ClusterFormTest(TestCase):
             class Meta:
                 model = Band
                 formsets = ('members',)
+                fields = ['name']
 
         form = BandForm()
         self.assertTrue(form.formsets.get('members'))
@@ -100,6 +107,7 @@ class ClusterFormTest(TestCase):
             class Meta:
                 model = Band
                 exclude_formsets = ('albums',)
+                fields = ['name']
 
         form = BandForm()
         self.assertTrue(form.formsets.get('members'))
@@ -118,6 +126,7 @@ class ClusterFormTest(TestCase):
                         'name': Textarea()
                     }
                 }
+                fields = ['name']
 
         form = BandForm()
         self.assertEqual(Textarea, type(form['name'].field.widget))
@@ -133,6 +142,7 @@ class ClusterFormTest(TestCase):
             formfield_callback = formfield_for_dbfield
             class Meta:
                 model = Band
+                fields = ['name']
 
         form = BandFormWithFFC()
         self.assertEqual(Textarea, type(form['name'].field.widget))
@@ -142,6 +152,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         beatles = Band(name='The Beatles', members=[
             BandMember(name='John Lennon'),
@@ -188,6 +199,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         beatles = Band(name='The Beatles', members=[
             BandMember(name='John Lennon'),
@@ -235,6 +247,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         form = BandForm({
             'name': "The Beatles",
@@ -274,6 +287,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         form = BandForm()
         form_html = form.as_p()
@@ -284,6 +298,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         form = BandForm({
             'name': "The Beatles",
@@ -314,6 +329,7 @@ class ClusterFormTest(TestCase):
         class BandForm(ClusterForm):
             class Meta:
                 model = Band
+                fields = ['name']
 
         please_please_me = Album(name='Please Please Me', release_date = datetime.date(1963, 3, 22))
         beatles = Band(name='The Beatles', albums=[please_please_me])
@@ -368,6 +384,7 @@ class ClusterFormTest(TestCase):
             class Meta:
                 model = Band
                 formsets = ()
+                fields = ['name']
 
         beatles = Band(name='The Beatles')
         beatles.save()
@@ -383,3 +400,83 @@ class ClusterFormTest(TestCase):
         self.assertEqual(1, Band.objects.filter(name='The Beatles').count())
         beatles.save()
         self.assertEqual(0, Band.objects.filter(name='The Beatles').count())
+
+    def test_formsets_from_model_superclass_are_exposed(self):
+        class RestaurantForm(ClusterForm):
+            class Meta:
+                model = Restaurant
+                fields = ['name', 'tags', 'serves_hot_dogs', 'proprietor']
+
+        self.assertIn('reviews', RestaurantForm.formsets)
+
+        form = RestaurantForm({
+            'name': 'The Fat Duck',
+
+            'menu_items-TOTAL_FORMS': 0,
+            'menu_items-INITIAL_FORMS': 0,
+            'menu_items-MAX_NUM_FORMS': 1000,
+
+            'reviews-TOTAL_FORMS': 1,
+            'reviews-INITIAL_FORMS': 1,
+            'reviews-MAX_NUM_FORMS': 1000,
+
+            'reviews-0-id': '',
+            'reviews-0-author': 'Michael Winner',
+            'reviews-0-body': 'Rubbish.',
+
+            'tagged_items-TOTAL_FORMS': 0,
+            'tagged_items-INITIAL_FORMS': 0,
+            'tagged_items-MAX_NUM_FORMS': 1000,
+        })
+        self.assertTrue(form.is_valid())
+        instance = form.save(commit=False)
+
+        self.assertEqual(instance.reviews.count(), 1)
+        self.assertEqual(instance.reviews.first().author, 'Michael Winner')
+
+    def test_formsets_from_model_superclass_with_explicit_formsets_def(self):
+        class RestaurantForm(ClusterForm):
+            class Meta:
+                model = Restaurant
+                formsets = ('menu_items', 'reviews')
+                fields = ['name', 'tags', 'serves_hot_dogs', 'proprietor']
+
+        self.assertIn('reviews', RestaurantForm.formsets)
+
+        form = RestaurantForm({
+            'name': 'The Fat Duck',
+
+            'menu_items-TOTAL_FORMS': 0,
+            'menu_items-INITIAL_FORMS': 0,
+            'menu_items-MAX_NUM_FORMS': 1000,
+
+            'reviews-TOTAL_FORMS': 1,
+            'reviews-INITIAL_FORMS': 1,
+            'reviews-MAX_NUM_FORMS': 1000,
+
+            'reviews-0-id': '',
+            'reviews-0-author': 'Michael Winner',
+            'reviews-0-body': 'Rubbish.',
+
+        })
+        self.assertTrue(form.is_valid())
+        instance = form.save(commit=False)
+
+        self.assertEqual(instance.reviews.count(), 1)
+        self.assertEqual(instance.reviews.first().author, 'Michael Winner')
+
+    def test_widgets_with_media(self):
+        class WidgetWithMedia(TextInput):
+            class Media:
+                js = ['test.js']
+                css = {'all': ['test.css']}
+
+        class FormWithWidgetMedia(ClusterForm):
+            class Meta:
+                model = Restaurant
+                fields = ['name', 'tags', 'serves_hot_dogs', 'proprietor']
+
+        form = FormWithWidgetMedia()
+
+        self.assertIn(text_type(form.media['js']), 'test.js')
+        self.assertIn(text_type(form.media['css']), 'test.css')
