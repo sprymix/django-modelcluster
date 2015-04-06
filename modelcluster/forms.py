@@ -89,6 +89,13 @@ class BaseChildFormSet(BaseTransientModelFormSet):
         manager.add(*saved_instances)
         manager.remove(*self.deleted_objects)
 
+        # ensure save_m2m is called even if commit = false. We don't fully support m2m fields yet,
+        # but if they perform save_form_data in a way that happens to play well with ClusterableModel
+        # (as taggit's manager does), we want that to take effect immediately, not just on db save
+        for form in self.saved_forms:
+            if hasattr(form, 'save_m2m'):
+                form.save_m2m()
+
         if commit:
             manager.commit()
 
