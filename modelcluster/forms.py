@@ -7,6 +7,7 @@ from django.forms.models import (
     ModelForm, _get_foreign_key, ModelFormMetaclass, ModelFormOptions
 )
 from django.db.models.fields.related import RelatedObject
+from django.core.exceptions import ValidationError
 
 from modelcluster.models import get_all_child_relations
 
@@ -113,7 +114,13 @@ class BaseChildFormSet(BaseTransientModelFormSet):
 
             # clean() for different types of PK fields can sometimes return
             # the model instance, and sometimes the PK. Handle either.
-            pk_value = form.fields[pk_name].clean(raw_pk_value)
+            try:
+                pk_value = form.fields[pk_name].clean(raw_pk_value)
+            except ValidationError:
+                # Handle cases where live data has been dropped, but is
+                # still present in serialized form.
+                continue
+
             pk_value = getattr(pk_value, 'pk', pk_value)
 
             obj = self._existing_object(pk_value)
