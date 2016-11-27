@@ -1,20 +1,10 @@
 from __future__ import unicode_literals
 
-import django
 from django.test import TestCase
 from django.db import IntegrityError
 
 from tests.models import Band, BandMember, Restaurant, Review, Album
 
-# make sure that we're using the same unittest library that Django uses internally
-try:
-    # Firstly, try to import unittest from Django
-    from django.utils import unittest
-except ImportError:
-    # Django doesn't include unittest
-    # We must be running on Django 1.7+ which doesn't support Python 2.6 so
-    # the standard unittest library should be unittest2
-    import unittest
 
 class ClusterTest(TestCase):
     def test_can_create_cluster(self):
@@ -119,7 +109,6 @@ class ClusterTest(TestCase):
         self.assertEqual(1, fat_duck.reviews.count())
         self.assertEqual(fat_duck.reviews.first().author, 'Michael Winner')
 
-
     def test_can_only_commit_on_saved_parent(self):
         beatles = Band(name='The Beatles', members=[
             BandMember(name='John Lennon'),
@@ -173,7 +162,6 @@ class ClusterTest(TestCase):
         normal_lists = [list(band.members.all()) for band in Band.objects.all()]
         self.assertEqual(lists, normal_lists)
 
-    @unittest.skipIf(django.VERSION < (1, 7), "Custom querysets on prefetch_related are only available in Django 1.7 and later")
     def test_prefetch_related_with_custom_queryset(self):
         from django.db.models import Prefetch
         Band.objects.create(name='The Beatles', members=[
@@ -240,3 +228,53 @@ class ClusterTest(TestCase):
         self.assertEqual(error.obj, Instrument.member.field)
         self.assertEqual(error.msg, 'ParentalKey must point to a subclass of ClusterableModel.')
         self.assertEqual(error.hint, 'Change tests.BandMember into a ClusterableModel or use a ForeignKey instead.')
+
+    def test_parental_key_checks_related_name_is_not_plus(self):
+        from django.core import checks
+        from django.db import models
+        from modelcluster.fields import ParentalKey
+
+        class Instrument(models.Model):
+            # Oops, related_name='+' is not allowed
+            band = ParentalKey(Band, related_name='+')
+
+            class Meta:
+                # Prevent Django from thinking this is in the database
+                # This shouldn't affect the test
+                abstract = True
+
+        # Check for error
+        errors = Instrument.check()
+        self.assertEqual(1, len(errors))
+
+        # Check the error itself
+        error = errors[0]
+        self.assertIsInstance(error, checks.Error)
+        self.assertEqual(error.id, 'modelcluster.E002')
+        self.assertEqual(error.obj, Instrument.band.field)
+        self.assertEqual(error.msg, "related_name='+' is not allowed on ParentalKey fields")
+        self.assertEqual(error.hint, "Either change it to a valid name or remove it")
+
+    def test_parental_key_checks_target_is_resolved_as_class(self):
+        from django.core import checks
+        from django.db import models
+        from modelcluster.fields import ParentalKey
+
+        class Instrument(models.Model):
+            banana = ParentalKey('Banana')
+
+            class Meta:
+                # Prevent Django from thinking this is in the database
+                # This shouldn't affect the test
+                abstract = True
+
+        # Check for error
+        errors = Instrument.check()
+        self.assertEqual(1, len(errors))
+
+        # Check the error itself
+        error = errors[0]
+        self.assertIsInstance(error, checks.Error)
+        self.assertEqual(error.id, 'fields.E300')
+        self.assertEqual(error.obj, Instrument.banana.field)
+        self.assertEqual(error.msg, "Field defines a relation with model 'Banana', which is either not installed, or is abstract.")

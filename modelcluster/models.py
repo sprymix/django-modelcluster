@@ -3,7 +3,6 @@ from __future__ import unicode_literals
 import json
 import datetime
 
-import django
 from django.db import models
 from django.db.models.fields.related import ForeignObjectRel
 from django.db.models.fields import FieldDoesNotExist
@@ -13,19 +12,9 @@ from django.conf import settings
 from django.utils import timezone
 
 
-def get_related_model(rel):
-    # In Django 1.7 and under, the related model is accessed by doing: rel.model
-    # This was renamed in Django 1.8 to rel.related_model. rel.model now returns
-    # the base model.
-    if django.VERSION >= (1, 8):
-        return rel.related_model
-    else:
-        return rel.model
-
-
 def get_field_value(field, model):
     if field.rel is None:
-        value = field._get_val_from_obj(model)
+        value = field.pre_save(model, add=model.pk is None)
 
         # Make datetimes timezone aware
         # https://github.com/django/django/blob/master/django/db/models/fields/__init__.py#L1394-L1403
@@ -43,6 +32,7 @@ def get_field_value(field, model):
     else:
         return getattr(model, field.get_attname())
 
+
 def get_serializable_data_for_fields(model):
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
@@ -57,6 +47,7 @@ def get_serializable_data_for_fields(model):
 
     return obj
 
+
 def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
@@ -70,12 +61,9 @@ def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
         except FieldDoesNotExist:
             continue
 
-        if django.VERSION >= (1, 8):
-            # Filter out reverse relations. In Django 1.7 and below, these
-            # would raise a FieldDoesNotExist error on the line above but
-            # we need to manually filter them out for Django 1.8 and above.
-            if isinstance(field, ForeignObjectRel):
-                continue
+        # Filter out reverse relations
+        if isinstance(field, ForeignObjectRel):
+            continue
 
         if field.rel and isinstance(field.rel, models.ManyToManyRel):
             raise Exception('m2m relations not supported yet')
@@ -208,7 +196,7 @@ class ClusterableModel(models.Model):
             rel_name = rel.get_accessor_name()
             children = getattr(self, rel_name).all()
 
-            if hasattr(get_related_model(rel), 'serializable_data'):
+            if hasattr(rel.related_model, 'serializable_data'):
                 obj[rel_name] = [child.serializable_data() for child in children]
             else:
                 obj[rel_name] = [get_serializable_data_for_fields(child) for child in children]
@@ -244,7 +232,7 @@ class ClusterableModel(models.Model):
             except KeyError:
                 continue
 
-            related_model = get_related_model(rel)
+            related_model = rel.related_model
             if hasattr(related_model, 'from_serializable_data'):
                 children = [
                     related_model.from_serializable_data(child_data, check_fks=check_fks, strict_fks=True)

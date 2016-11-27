@@ -16,7 +16,7 @@ except ImportError:
 from modelcluster.utils import sort_by_fields
 
 from modelcluster.queryset import FakeQuerySet
-from modelcluster.models import get_related_model, ClusterableModel
+from modelcluster.models import ClusterableModel
 
 
 def create_deferring_foreign_related_manager(related, original_manager_cls):
@@ -29,7 +29,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
 
     relation_name = related.get_accessor_name()
     rel_field = related.field
-    rel_model = get_related_model(related)
+    rel_model = related.related_model
     superclass = rel_model._default_manager.__class__
 
     class DeferringRelatedManager(superclass):
@@ -59,7 +59,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             except (AttributeError, KeyError):
                 return self.get_live_queryset()
 
-            return FakeQuerySet(get_related_model(related), results)
+            return FakeQuerySet(related.related_model, results)
 
         def get_prefetch_queryset(self, instances, queryset=None):
             if queryset is None:
@@ -113,7 +113,8 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             # instead, we consider them to match IF:
             # - they are exactly the same Python object (by reference), or
             # - they have a non-null primary key that matches
-            items_match = lambda item, target: (item is target) or (item.pk == target.pk and item.pk is not None)
+            def items_match(item, target):
+                return (item is target) or (item.pk == target.pk and item.pk is not None)
 
             for target in new_items:
                 item_matched = False
@@ -149,7 +150,8 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             # instead, we consider them to match IF:
             # - they are exactly the same Python object (by reference), or
             # - they have a non-null primary key that matches
-            items_match = lambda item, target: (item is target) or (item.pk == target.pk and item.pk is not None)
+            def items_match(item, target):
+                return (item is target) or (item.pk == target.pk and item.pk is not None)
 
             for target in items_to_remove:
                 # filter items list in place: see http://stackoverflow.com/a/1208792/1853523
@@ -157,7 +159,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
 
         def create(self, **kwargs):
             items = self.get_object_list()
-            new_item = get_related_model(related)(**kwargs)
+            new_item = related.related_model(**kwargs)
             items.append(new_item)
             return new_item
 
@@ -256,8 +258,11 @@ class ParentalKey(ForeignKey):
     def check(self, **kwargs):
         errors = super(ParentalKey, self).check(**kwargs)
 
-        # Check that the desination model is a subclass of ClusterableModel
-        if not issubclass(self.rel.to, ClusterableModel):
+        # Check that the destination model is a subclass of ClusterableModel.
+        # If self.rel.to is a string at this point, it means that Django has been unable
+        # to resolve it as a model name; if so, skip this test so that Django's own
+        # system checks can report the appropriate error
+        if isinstance(self.rel.to, type) and not issubclass(self.rel.to, ClusterableModel):
             errors.append(
                 checks.Error(
                     'ParentalKey must point to a subclass of ClusterableModel.',
@@ -266,6 +271,17 @@ class ParentalKey(ForeignKey):
                     ),
                     obj=self,
                     id='modelcluster.E001',
+                )
+            )
+
+        # ParentalKeys must have an accessor name (#49)
+        if self.rel.get_accessor_name() == '+':
+            errors.append(
+                checks.Error(
+                    "related_name='+' is not allowed on ParentalKey fields",
+                    hint="Either change it to a valid name or remove it",
+                    obj=self,
+                    id='modelcluster.E002',
                 )
             )
 

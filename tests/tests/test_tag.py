@@ -1,10 +1,13 @@
 from __future__ import unicode_literals
 
-from django.test import TestCase
+import unittest
+
+from django.test import TestCase, override_settings
 from taggit.models import Tag
 from modelcluster.forms import ClusterForm
 
 from tests.models import Place, TaggedPlace
+
 
 class TagTest(TestCase):
     def test_can_access_tags_on_unsaved_instance(self):
@@ -39,6 +42,34 @@ class TagTest(TestCase):
         mission_burrito.save()
         self.assertEqual(2, TaggedPlace.objects.filter(content_object_id=mission_burrito.id).count())
 
+    def test_prefetch_tags_doesnt_break(self):
+        mission_burrito = Place(name='Mission Burrito')
+        mission_burrito.tags.add('mexican', 'burrito')
+        mission_burrito.save()
+
+        atomic_burger = Place(name='Atomic Burger')
+        atomic_burger.tags.add('burger')
+        atomic_burger.save()
+
+        places = list(Place.objects.order_by('name').prefetch_related('tags'))
+        self.assertEqual(places[0].name, 'Atomic Burger')
+        self.assertEqual(places[0].tags.first().name, 'burger')
+
+    @unittest.expectedFailure
+    def test_prefetch_tags_actually_prefetches(self):
+        mission_burrito = Place(name='Mission Burrito')
+        mission_burrito.tags.add('mexican', 'burrito')
+        mission_burrito.save()
+
+        atomic_burger = Place(name='Atomic Burger')
+        atomic_burger.tags.add('burger')
+        atomic_burger.save()
+
+        with self.assertNumQueries(2):
+            places = list(Place.objects.order_by('name').prefetch_related('tags'))
+            self.assertEqual(places[0].name, 'Atomic Burger')
+            self.assertEqual(places[0].tags.first().name, 'burger')
+
     def test_tag_form_field(self):
         class PlaceForm(ClusterForm):
             class Meta:
@@ -62,3 +93,19 @@ class TagTest(TestCase):
         self.assertTrue(Tag.objects.get(name='burrito') in mission_burrito.tags.all())
         self.assertTrue(Tag.objects.get(name='fajita') in mission_burrito.tags.all())
         self.assertFalse(Tag.objects.get(name='mexican') in mission_burrito.tags.all())
+
+    @override_settings(TAGGIT_CASE_INSENSITIVE=True)
+    def test_case_insensitive_tags(self):
+        mission_burrito = Place(name='Mission Burrito')
+        mission_burrito.tags.add('burrito')
+        mission_burrito.tags.add('Burrito')
+
+        self.assertEqual(1, mission_burrito.tags.count())
+
+    def test_integers(self):
+        """Adding an integer as a tag should raise a ValueError"""
+        mission_burrito = Place(name='Mission Burrito')
+        with self.assertRaisesRegexp(ValueError, (
+                r"Cannot add 1 \(<(type|class) 'int'>\). "
+                r"Expected <class 'django.db.models.base.ModelBase'> or str.")):
+            mission_burrito.tags.add(1)
