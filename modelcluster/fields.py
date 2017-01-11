@@ -1,19 +1,22 @@
 from __future__ import unicode_literals
 
-from django.db import models, IntegrityError, router
-from django.db.models.fields.related import ForeignKey, ForeignRelatedObjectsDescriptor
+import django
+from django.core import checks
+from django.db import IntegrityError, router
+from django.db.models.fields.related import ForeignKey
 from django.utils.functional import cached_property
+
+try:
+    from django.db.models.fields.related import ReverseManyToOneDescriptor
+except ImportError:
+    # Django 1.8 and below
+    from django.db.models.fields.related import ForeignRelatedObjectsDescriptor as ReverseManyToOneDescriptor
+
 
 from modelcluster.utils import sort_by_fields
 
-try:
-    from south.modelsinspector import add_introspection_rules
-except ImportError:
-    # south is not in use, so make add_introspection_rules a no-op
-    def add_introspection_rules(*args):
-        pass
-
 from modelcluster.queryset import FakeQuerySet
+from modelcluster.models import ClusterableModel
 
 
 def create_deferring_foreign_related_manager(related, original_manager_cls):
@@ -26,8 +29,8 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
 
     relation_name = related.get_accessor_name()
     rel_field = related.field
-    superclass = related.model._default_manager.__class__
-    rel_model = related.model
+    rel_model = related.related_model
+    superclass = rel_model._default_manager.__class__
 
     class DeferringRelatedManager(superclass):
         def __init__(self, instance):
@@ -56,7 +59,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             except (AttributeError, KeyError):
                 return self.get_live_queryset()
 
-            return FakeQuerySet(related.model, results)
+            return FakeQuerySet(related.related_model, results)
 
         def get_prefetch_queryset(self, instances, queryset=None):
             if queryset is None:
@@ -98,7 +101,6 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
 
             return object_list
 
-
         def add(self, *new_items):
             """
             Add the passed items to the stored object set, but do not commit them
@@ -111,7 +113,8 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             # instead, we consider them to match IF:
             # - they are exactly the same Python object (by reference), or
             # - they have a non-null primary key that matches
-            items_match = lambda item, target: (item is target) or (item.pk == target.pk and item.pk is not None)
+            def items_match(item, target):
+                return (item is target) or (item.pk == target.pk and item.pk is not None)
 
             for target in new_items:
                 item_matched = False
@@ -147,7 +150,8 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
             # instead, we consider them to match IF:
             # - they are exactly the same Python object (by reference), or
             # - they have a non-null primary key that matches
-            items_match = lambda item, target: (item is target) or (item.pk == target.pk and item.pk is not None)
+            def items_match(item, target):
+                return (item is target) or (item.pk == target.pk and item.pk is not None)
 
             for target in items_to_remove:
                 # filter items list in place: see http://stackoverflow.com/a/1208792/1853523
@@ -155,7 +159,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
 
         def create(self, **kwargs):
             items = self.get_object_list()
-            new_item = related.model(**kwargs)
+            new_item = related.related_model(**kwargs)
             items.append(new_item)
             return new_item
 
@@ -194,7 +198,15 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
                     item.delete()
 
             for item in final_items:
-                original_manager.add(item)
+                if django.VERSION >= (1, 9):
+                    # Django 1.9+ bulk updates items by default which assumes
+                    # that they have already been saved to the database.
+                    # Disable this behaviour.
+                    # https://code.djangoproject.com/ticket/18556
+                    # https://github.com/django/django/commit/adc0c4fbac98f9cb975e8fa8220323b2de638b46
+                    original_manager.add(item, bulk=False)
+                else:
+                    original_manager.add(item)
 
             # purge the _cluster_related_objects entry, so we switch back to live SQL
             del self.instance._cluster_related_objects[relation_name]
@@ -202,10 +214,7 @@ def create_deferring_foreign_related_manager(related, original_manager_cls):
     return DeferringRelatedManager
 
 
-class ChildObjectsDescriptor(ForeignRelatedObjectsDescriptor):
-    def __init__(self, related):
-        super(ChildObjectsDescriptor, self).__init__(related)
-
+class ChildObjectsDescriptor(ReverseManyToOneDescriptor):
     def __get__(self, instance, instance_type=None):
         if instance is None:
             return self
@@ -219,24 +228,25 @@ class ChildObjectsDescriptor(ForeignRelatedObjectsDescriptor):
 
     @cached_property
     def child_object_manager_cls(self):
-        return create_deferring_foreign_related_manager(self.related, self.related_manager_cls)
+        try:
+            rel = self.rel
+        except AttributeError:
+            # Django 1.8 and below
+            rel = self.related
+
+        return create_deferring_foreign_related_manager(rel, self.related_manager_cls)
 
 
 class ParentalKey(ForeignKey):
     related_accessor_class = ChildObjectsDescriptor
 
-    # prior to https://github.com/django/django/commit/fa2e1371cda1e72d82b4133ad0b49a18e43ba411
-    # ForeignRelatedObjectsDescriptor is hard-coded in contribute_to_related_class -
-    # so we need to patch in that change to look up related_accessor_class instead
+    # Django 1.8 has a check to prevent unsaved instances being assigned to
+    # ForeignKeys. Disable it
+    # This check was moved to the save() method in Django 1.8.4
+    allow_unsaved_instance_assignment = True
+
     def contribute_to_related_class(self, cls, related):
-        # Internal FK's - i.e., those with a related name ending with '+' -
-        # and swapped models don't get a related descriptor.
-        if not self.rel.is_hidden() and not related.model._meta.swapped:
-            setattr(cls, related.get_accessor_name(), self.related_accessor_class(related))
-            if self.rel.limit_choices_to:
-                cls._meta.related_fkey_lookups.append(self.rel.limit_choices_to)
-        if self.rel.field_name is None:
-            self.rel.field_name = cls._meta.pk.name
+        super(ParentalKey, self).contribute_to_related_class(cls, related)
 
         # store this as a child field in meta. NB child_relations only contains relations
         # defined to this specific model, not its superclasses
@@ -245,4 +255,34 @@ class ParentalKey(ForeignKey):
         except AttributeError:
             cls._meta.child_relations = [related]
 
-add_introspection_rules([], ["^modelcluster\.fields\.ParentalKey"])
+    def check(self, **kwargs):
+        errors = super(ParentalKey, self).check(**kwargs)
+
+        # Check that the destination model is a subclass of ClusterableModel.
+        # If self.rel.to is a string at this point, it means that Django has been unable
+        # to resolve it as a model name; if so, skip this test so that Django's own
+        # system checks can report the appropriate error
+        if isinstance(self.rel.to, type) and not issubclass(self.rel.to, ClusterableModel):
+            errors.append(
+                checks.Error(
+                    'ParentalKey must point to a subclass of ClusterableModel.',
+                    hint='Change {model_name} into a ClusterableModel or use a ForeignKey instead.'.format(
+                        model_name=self.rel.to._meta.app_label + '.' + self.rel.to.__name__,
+                    ),
+                    obj=self,
+                    id='modelcluster.E001',
+                )
+            )
+
+        # ParentalKeys must have an accessor name (#49)
+        if self.rel.get_accessor_name() == '+':
+            errors.append(
+                checks.Error(
+                    "related_name='+' is not allowed on ParentalKey fields",
+                    hint="Either change it to a valid name or remove it",
+                    obj=self,
+                    id='modelcluster.E002',
+                )
+            )
+
+        return errors

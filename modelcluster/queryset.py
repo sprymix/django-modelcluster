@@ -4,6 +4,7 @@ from django.db.models import Model
 
 from modelcluster.utils import sort_by_fields
 
+
 # Constructor for test functions that determine whether an object passes some boolean condition
 def test_exact(model, attribute_name, value):
     field = model._meta.get_field(attribute_name)
@@ -27,6 +28,7 @@ def test_exact(model, attribute_name, value):
         # just a plain Python value = do a normal equality check
         return lambda obj: getattr(obj, attribute_name) == typed_value
 
+
 class FakeQuerySet(object):
     def __init__(self, model, results):
         self.model = model
@@ -35,9 +37,11 @@ class FakeQuerySet(object):
     def all(self):
         return self
 
-    def filter(self, **kwargs):
-        filters = []  # a list of test functions; objects must pass all tests to be included
-            # in the filtered list
+    def _get_filters(self, **kwargs):
+        # a list of test functions; objects must pass all tests to be included
+        # in the filtered list
+        filters = []
+
         for key, val in kwargs.items():
             key_clauses = key.split('__')
             if len(key_clauses) != 1:
@@ -45,9 +49,24 @@ class FakeQuerySet(object):
 
             filters.append(test_exact(self.model, key_clauses[0], val))
 
+        return filters
+
+    def filter(self, **kwargs):
+        filters = self._get_filters(**kwargs)
+
         filtered_results = [
             obj for obj in self.results
             if all([test(obj) for test in filters])
+        ]
+
+        return FakeQuerySet(self.model, filtered_results)
+
+    def exclude(self, **kwargs):
+        filters = self._get_filters(**kwargs)
+
+        filtered_results = [
+            obj for obj in self.results
+            if not all([test(obj) for test in filters])
         ]
 
         return FakeQuerySet(self.model, filtered_results)

@@ -4,6 +4,7 @@ import json
 import datetime
 
 from django.db import models
+from django.db.models.fields.related import ForeignObjectRel
 from django.db.models.fields import FieldDoesNotExist
 from django.utils.encoding import is_protected_type
 from django.core.serializers.json import DjangoJSONEncoder
@@ -13,7 +14,7 @@ from django.utils import timezone
 
 def get_field_value(field, model):
     if field.rel is None:
-        value = field._get_val_from_obj(model)
+        value = field.pre_save(model, add=model.pk is None)
 
         # Make datetimes timezone aware
         # https://github.com/django/django/blob/master/django/db/models/fields/__init__.py#L1394-L1403
@@ -31,6 +32,7 @@ def get_field_value(field, model):
     else:
         return getattr(model, field.get_attname())
 
+
 def get_serializable_data_for_fields(model):
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
@@ -45,6 +47,7 @@ def get_serializable_data_for_fields(model):
 
     return obj
 
+
 def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
@@ -56,6 +59,10 @@ def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
         try:
             field = model._meta.get_field(field_name)
         except FieldDoesNotExist:
+            continue
+
+        # Filter out reverse relations
+        if isinstance(field, ForeignObjectRel):
             continue
 
         if field.rel and isinstance(field.rel, models.ManyToManyRel):
@@ -189,7 +196,7 @@ class ClusterableModel(models.Model):
             rel_name = rel.get_accessor_name()
             children = getattr(self, rel_name).all()
 
-            if hasattr(rel.model, 'serializable_data'):
+            if hasattr(rel.related_model, 'serializable_data'):
                 obj[rel_name] = [child.serializable_data() for child in children]
             else:
                 obj[rel_name] = [get_serializable_data_for_fields(child) for child in children]
@@ -225,14 +232,15 @@ class ClusterableModel(models.Model):
             except KeyError:
                 continue
 
-            if hasattr(rel.model, 'from_serializable_data'):
+            related_model = rel.related_model
+            if hasattr(related_model, 'from_serializable_data'):
                 children = [
-                    rel.model.from_serializable_data(child_data, check_fks=check_fks, strict_fks=True)
+                    related_model.from_serializable_data(child_data, check_fks=check_fks, strict_fks=True)
                     for child_data in child_data_list
                 ]
             else:
                 children = [
-                    model_from_serializable_data(rel.model, child_data, check_fks=check_fks, strict_fks=True)
+                    model_from_serializable_data(related_model, child_data, check_fks=check_fks, strict_fks=True)
                     for child_data in child_data_list
                 ]
 

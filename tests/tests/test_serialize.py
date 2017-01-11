@@ -3,10 +3,11 @@ from __future__ import unicode_literals
 import json
 import datetime
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils import timezone
 
-from tests.models import Band, BandMember, Album, Restaurant, Dish, MenuItem, Chef, Wine, Review, Log
+from tests.models import Band, BandMember, Album, Restaurant, Dish, MenuItem, Chef, Wine, Review, Log, Document
 
 
 class SerializeTest(TestCase):
@@ -129,7 +130,6 @@ class SerializeTest(TestCase):
         self.assertEqual(1, beatles.albums.all()[1].pk)
         self.assertEqual(3, beatles.albums.all()[2].pk)
 
-
     WAGTAIL_05_RELEASE_DATETIME = datetime.datetime(2014, 8, 1, 11, 1, 42)
 
     def test_serialise_with_naive_datetime(self):
@@ -149,12 +149,7 @@ class SerializeTest(TestCase):
         """
         # make an aware datetime, consisting of WAGTAIL_05_RELEASE_DATETIME
         # in a timezone 1hr west of UTC
-        try:
-            one_hour_west = timezone.get_fixed_timezone(-60)
-        except AttributeError:
-            # use deprecated-in-Django-1.7 class constructor
-            from django.utils.tzinfo import FixedOffset
-            one_hour_west = FixedOffset(-60)
+        one_hour_west = timezone.get_fixed_timezone(-60)
 
         local_time = timezone.make_aware(self.WAGTAIL_05_RELEASE_DATETIME, one_hour_west)
         log = Log(time=local_time, data="Wagtail 0.5 released")
@@ -195,3 +190,12 @@ class SerializeTest(TestCase):
     def test_deserialise_with_null_datetime(self):
         log = Log.from_json('{"data": "Someone scanned a QR code", "time": null, "pk": null}')
         self.assertEqual(log.time, None)
+
+    def test_serialise_saves_file_fields(self):
+        doc = Document(title='Hello')
+        doc.file = SimpleUploadedFile('hello.txt', b'Hello world')
+
+        doc_json = doc.to_json()
+        new_doc = Document.from_json(doc_json)
+
+        self.assertEqual(new_doc.file.read(), b'Hello world')

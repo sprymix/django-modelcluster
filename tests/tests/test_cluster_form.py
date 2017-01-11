@@ -1,6 +1,6 @@
 from __future__ import unicode_literals
 
-from six import text_type
+from django.utils.six import text_type
 
 from django.test import TestCase
 from tests.models import Band, BandMember, Album, Restaurant
@@ -160,6 +160,7 @@ class ClusterFormTest(TestCase):
 
         class BandFormWithFFC(ClusterForm):
             formfield_callback = formfield_for_dbfield
+
             class Meta:
                 model = Band
                 fields = ['name']
@@ -174,14 +175,12 @@ class ClusterFormTest(TestCase):
                 model = Band
                 fields = ['name']
 
-        beatles = Band(name='The Beatles', members=[
-            BandMember(name='John Lennon'),
-            BandMember(name='Paul McCartney'),
-        ])
+        john = BandMember(name='John Lennon')
+        paul = BandMember(name='Paul McCartney')
+        beatles = Band(name='The Beatles', members=[john, paul])
         beatles.save()
-        member0, member1 = beatles.members.all()
-        self.assertTrue(member0.id)
-        self.assertTrue(member1.id)
+        self.assertTrue(john.id)
+        self.assertTrue(paul.id)
 
         form = BandForm({
             'name': "The New Beatles",
@@ -190,12 +189,12 @@ class ClusterFormTest(TestCase):
             'members-INITIAL_FORMS': 2,
             'members-MAX_NUM_FORMS': 1000,
 
-            'members-0-name': member0.name,
+            'members-0-name': john.name,
             'members-0-DELETE': 'members-0-DELETE',
-            'members-0-id': member0.id,
+            'members-0-id': john.id,
 
-            'members-1-name': member1.name,
-            'members-1-id': member1.id,
+            'members-1-name': paul.name,
+            'members-1-id': paul.id,
 
             'members-2-name': 'George Harrison',
             'members-2-id': '',
@@ -221,12 +220,10 @@ class ClusterFormTest(TestCase):
                 model = Band
                 fields = ['name']
 
-        beatles = Band(name='The Beatles', members=[
-            BandMember(name='John Lennon'),
-            BandMember(name='Paul McCartney'),
-        ])
+        john = BandMember(name='John Lennon')
+        paul = BandMember(name='Paul McCartney')
+        beatles = Band(name='The Beatles', members=[john, paul])
         beatles.save()
-        member0, member1 = beatles.members.all()
 
         # pack and unpack the record so that we're working with a non-db-backed queryset
         new_beatles = Band.from_json(beatles.to_json())
@@ -238,12 +235,12 @@ class ClusterFormTest(TestCase):
             'members-INITIAL_FORMS': 2,
             'members-MAX_NUM_FORMS': 1000,
 
-            'members-0-name': member0.name,
+            'members-0-name': john.name,
             'members-0-DELETE': 'members-0-DELETE',
-            'members-0-id': member0.id,
+            'members-0-id': john.id,
 
-            'members-1-name': member1.name,
-            'members-1-id': member1.id,
+            'members-1-name': paul.name,
+            'members-1-id': paul.id,
 
             'members-2-name': 'George Harrison',
             'members-2-id': '',
@@ -351,7 +348,7 @@ class ClusterFormTest(TestCase):
                 model = Band
                 fields = ['name']
 
-        please_please_me = Album(name='Please Please Me', release_date = datetime.date(1963, 3, 22))
+        please_please_me = Album(name='Please Please Me', release_date=datetime.date(1963, 3, 22))
         beatles = Band(name='The Beatles', albums=[please_please_me])
         beatles.save()
 
@@ -393,7 +390,7 @@ class ClusterFormTest(TestCase):
         }, instance=beatles)
 
         self.assertTrue(form.is_valid())
-        result = form.save(commit=False)
+        form.save(commit=False)
         self.assertEqual(0, beatles.albums.count())
         self.assertEqual(1, Band.objects.get(id=beatles.id).albums.count())
         beatles.save()

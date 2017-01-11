@@ -1,13 +1,14 @@
 from __future__ import unicode_literals
 
-from six import with_metaclass
+from django.utils.six import with_metaclass
 
 from django.forms.models import (
     BaseModelFormSet, modelformset_factory,
     ModelForm, _get_foreign_key, ModelFormMetaclass, ModelFormOptions
 )
-from django.db.models.fields.related import RelatedObject
-from django.core.exceptions import ValidationError
+
+from django.db.models.fields.related import ForeignObjectRel
+
 
 from modelcluster.models import get_all_child_relations
 
@@ -28,12 +29,13 @@ class BaseTransientModelFormSet(BaseModelFormSet):
         elif self.initial_extra:
             # Set initial values for extra forms
             try:
-                kwargs['initial'] = self.initial_extra[i-self.initial_form_count()]
+                kwargs['initial'] = self.initial_extra[i - self.initial_form_count()]
             except IndexError:
                 pass
 
         # bypass BaseModelFormSet's own _construct_form
         return super(BaseModelFormSet, self)._construct_form(i, **kwargs)
+
 
 def transientmodelformset_factory(model, formset=BaseTransientModelFormSet, **kwargs):
     return modelformset_factory(model, formset=formset, **kwargs)
@@ -44,9 +46,9 @@ class BaseChildFormSet(BaseTransientModelFormSet):
         if instance is None:
             self.instance = self.fk.rel.to()
         else:
-            self.instance=instance
+            self.instance = instance
 
-        self.rel_name = RelatedObject(self.fk.rel.to, self.model, self.fk).get_accessor_name()
+        self.rel_name = ForeignObjectRel(self.fk, self.fk.rel.to, related_name=self.fk.rel.related_name).get_accessor_name()
 
         if queryset is None:
             queryset = getattr(self.instance, self.rel_name).all()
@@ -92,61 +94,19 @@ class BaseChildFormSet(BaseTransientModelFormSet):
 
         return saved_instances
 
-    # Prior to Django 1.7, objects are deleted from the database even when commit=False:
-    # https://code.djangoproject.com/ticket/10284
-    # This was fixed in https://github.com/django/django/commit/65e03a424e82e157b4513cdebb500891f5c78363
-    # We rely on the fixed behaviour here, so until 1.7 ships we need to override save_existing_objects
-    # with a patched version.
-    def save_existing_objects(self, commit=True):
-        self.changed_objects = []
-        self.deleted_objects = []
-        if not self.initial_forms:
-            return []
 
-        saved_instances = []
-        try:
-            forms_to_delete = self.deleted_forms
-        except AttributeError:
-            forms_to_delete = []
-        for form in self.initial_forms:
-            pk_name = self._pk_field.name
-            raw_pk_value = form._raw_value(pk_name)
-
-            # clean() for different types of PK fields can sometimes return
-            # the model instance, and sometimes the PK. Handle either.
-            try:
-                pk_value = form.fields[pk_name].clean(raw_pk_value)
-            except ValidationError:
-                # Handle cases where live data has been dropped, but is
-                # still present in serialized form.
-                continue
-
-            pk_value = getattr(pk_value, 'pk', pk_value)
-
-            obj = self._existing_object(pk_value)
-            if form in forms_to_delete:
-                self.deleted_objects.append(obj)
-                # === BEGIN PATCH ===
-                if commit:
-                    obj.delete()
-                # === END PATCH ===
-                continue
-            if form.has_changed():
-                self.changed_objects.append((obj, form.changed_data))
-                saved_instances.append(self.save_existing(form, obj, commit=commit))
-                if not commit:
-                    self.saved_forms.append(form)
-        return saved_instances
-
-def childformset_factory(parent_model, model, form=ModelForm,
+def childformset_factory(
+    parent_model, model, form=ModelForm,
     formset=BaseChildFormSet, fk_name=None, fields=None, exclude=None,
-    extra=3, can_order=False, can_delete=True, max_num=None,
-    formfield_callback=None, widgets=None):
+    extra=3, can_order=False, can_delete=True, max_num=None, validate_max=False,
+    formfield_callback=None, widgets=None, min_num=None, validate_min=False
+):
 
     fk = _get_foreign_key(parent_model, model, fk_name=fk_name)
     # enforce a max_num=1 when the foreign key to the parent model is unique.
     if fk.unique:
         max_num = 1
+        validate_max = True
 
     if exclude is None:
         exclude = []
@@ -164,7 +124,10 @@ def childformset_factory(parent_model, model, form=ModelForm,
         'fields': fields,
         'exclude': exclude,
         'max_num': max_num,
+        'validate_max': validate_max,
         'widgets': widgets,
+        'min_num': min_num,
+        'validate_min': validate_min,
     }
     FormSet = transientmodelformset_factory(model, **kwargs)
     FormSet.fk = fk
@@ -176,6 +139,7 @@ class ClusterFormOptions(ModelFormOptions):
         super(ClusterFormOptions, self).__init__(options=options)
         self.formsets = getattr(options, 'formsets', None)
         self.exclude_formsets = getattr(options, 'exclude_formsets', None)
+
 
 class ClusterFormMetaclass(ModelFormMetaclass):
     extra_form_count = 3
@@ -204,7 +168,7 @@ class ClusterFormMetaclass(ModelFormMetaclass):
             for rel in get_all_child_relations(opts.model):
                 # to build a childformset class from this relation, we need to specify:
                 # - the base model (opts.model)
-                # - the child model (rel.model)
+                # - the child model (rel.field.model)
                 # - the fk_name from the child model to the base (rel.field.name)
 
                 rel_name = rel.get_accessor_name()
@@ -234,7 +198,7 @@ class ClusterFormMetaclass(ModelFormMetaclass):
                 except AttributeError:
                     pass
 
-                formset = childformset_factory(opts.model, rel.model, **kwargs)
+                formset = childformset_factory(opts.model, rel.field.model, **kwargs)
                 formsets[rel_name] = formset
 
             new_class.formsets = formsets

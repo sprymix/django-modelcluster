@@ -1,6 +1,41 @@
 Changelog
 =========
 
+2.0 (22.04.2016)
+~~~~~~~~~~~~~~~~
+* Removed Django 1.7 and Python 3.2 support
+* Added system check to disallow related_name='+' on ParentalKey
+* Added support for TAGGIT_CASE_INSENSITIVE on ClusterTaggableManager
+* Field values for serialization are now fetched via pre_save (which, in particular, ensures that file fields are committed to storage)
+* Fix: System checks now correctly report a model name that cannot be resolved to a model
+* Fix: prefetch_related on a ClusterTaggableManager no longer fails (but doesn't prefetch either)
+* Fix: Adding invalid types as tags now correctly reports a ValueError
+
+1.1 (17.12.2015)
+~~~~~~~~~~~~~~~~
+* Django 1.9 compatibility
+* Added exclude() method to FakeQuerySet
+* Removed dependency on the 'six' package, in favour of Django's built-in version
+
+1.0 (09.10.2015)
+~~~~~~~~~~~~~~~~
+* Removed Django 1.6 and Python 2.6 support
+* Added system check to ensure that ParentalKey points to a ClusterableModel
+* Added validate_max, min_num and validate_min parameters to childformset_factory
+
+0.6.2 (13.04.2015)
+~~~~~~~~~~~~~~~~~~
+* Fix: Updated add_ignored_fields declaration so that South / Django 1.6 correctly ignores modelcluster.contrib.taggit.ClusterTaggableManager again
+
+0.6.1 (09.04.2015)
+~~~~~~~~~~~~~~~~~~
+* Django 1.8 compatibility
+* 'modelcluster.tags' module has been moved to 'modelcluster.contrib.taggit'
+
+0.6 (09.04.2015)
+~~~~~~~~~~~~~~~~
+(withdrawn due to packaging issues)
+
 0.5 (03.02.2015)
 ~~~~~~~~~~~~~~~~
 * ClusterForm.Meta formsets can now be specified as a dict to allow extra properties to be set on the underlying form.
