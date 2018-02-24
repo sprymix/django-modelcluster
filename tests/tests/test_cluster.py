@@ -1,9 +1,14 @@
 from __future__ import unicode_literals
 
+import unittest
+
 from django.test import TestCase
 from django.db import IntegrityError
 
-from tests.models import Band, BandMember, Restaurant, Review, Album
+from modelcluster.models import get_all_child_relations
+
+from tests.models import Band, BandMember, Restaurant, Review, Album, \
+    Article, Author, Category
 
 
 class ClusterTest(TestCase):
@@ -87,6 +92,10 @@ class ClusterTest(TestCase):
         self.assertEqual(2, beatles.members.count())
         self.assertEqual('George Harrison', george.name)
 
+        beatles.members.set([john])
+        self.assertEqual(1, beatles.members.count())
+        self.assertEqual(john, beatles.members.all()[0])
+
     def test_can_pass_child_relations_as_constructor_kwargs(self):
         beatles = Band(name='The Beatles', members=[
             BandMember(name='John Lennon'),
@@ -118,6 +127,29 @@ class ClusterTest(TestCase):
 
         beatles.save()
         beatles.members.commit()
+
+    def test_save_with_update_fields(self):
+        beatles = Band(name='The Beatles', members=[
+            BandMember(name='John Lennon'),
+            BandMember(name='Paul McCartney'),
+        ], albums=[
+            Album(name='Please Please Me', sort_order=1),
+            Album(name='With The Beatles', sort_order=2),
+            Album(name='Abbey Road', sort_order=3),
+        ])
+
+        beatles.save()
+
+        # modify both relations, but only commit the change to members
+        beatles.members.clear()
+        beatles.albums.clear()
+        beatles.name = 'The Rutles'
+        beatles.save(update_fields=['name', 'members'])
+
+        updated_beatles = Band.objects.get(pk=beatles.pk)
+        self.assertEqual(updated_beatles.name, 'The Rutles')
+        self.assertEqual(updated_beatles.members.count(), 0)
+        self.assertEqual(updated_beatles.albums.count(), 3)
 
     def test_queryset_filtering(self):
         beatles = Band(name='The Beatles', members=[
@@ -210,7 +242,7 @@ class ClusterTest(TestCase):
 
         class Instrument(models.Model):
             # Oops, BandMember is not a Clusterable model
-            member = ParentalKey(BandMember)
+            member = ParentalKey(BandMember, on_delete=models.CASCADE)
 
             class Meta:
                 # Prevent Django from thinking this is in the database
@@ -236,7 +268,7 @@ class ClusterTest(TestCase):
 
         class Instrument(models.Model):
             # Oops, related_name='+' is not allowed
-            band = ParentalKey(Band, related_name='+')
+            band = ParentalKey(Band, related_name='+', on_delete=models.CASCADE)
 
             class Meta:
                 # Prevent Django from thinking this is in the database
@@ -261,7 +293,7 @@ class ClusterTest(TestCase):
         from modelcluster.fields import ParentalKey
 
         class Instrument(models.Model):
-            banana = ParentalKey('Banana')
+            banana = ParentalKey('Banana', on_delete=models.CASCADE)
 
             class Meta:
                 # Prevent Django from thinking this is in the database
@@ -278,3 +310,161 @@ class ClusterTest(TestCase):
         self.assertEqual(error.id, 'fields.E300')
         self.assertEqual(error.obj, Instrument.banana.field)
         self.assertEqual(error.msg, "Field defines a relation with model 'Banana', which is either not installed, or is abstract.")
+
+
+class GetAllChildRelationsTest(TestCase):
+    def test_get_all_child_relations(self):
+        self.assertEqual(
+            set([rel.name for rel in get_all_child_relations(Restaurant)]),
+            set(['tagged_items', 'reviews', 'menu_items'])
+        )
+
+
+class ParentalM2MTest(TestCase):
+    def setUp(self):
+        self.article = Article(title="Test Title")
+        self.author_1 = Author.objects.create(name="Author 1")
+        self.author_2 = Author.objects.create(name="Author 2")
+        self.article.authors = [self.author_1, self.author_2]
+        self.category_1 = Category.objects.create(name="Category 1")
+        self.category_2 = Category.objects.create(name="Category 2")
+        self.article.categories = [self.category_1, self.category_2]
+
+    def test_uninitialised_m2m_relation(self):
+        # Reading an m2m relation of a newly created object should return an empty queryset
+        new_article = Article(title="Test title")
+        self.assertEqual([], list(new_article.authors.all()))
+        self.assertEqual(new_article.authors.count(), 0)
+
+        # the manager should have a 'model' property pointing to the target model
+        self.assertEqual(Author, new_article.authors.model)
+
+    def test_parentalm2mfield(self):
+        # Article should not exist in the database yet
+        self.assertFalse(Article.objects.filter(title='Test Title').exists())
+
+        # Test lookup on parental M2M relation
+        self.assertEqual(
+            ['Author 1', 'Author 2'],
+            [author.name for author in self.article.authors.order_by('name')]
+        )
+        self.assertEqual(self.article.authors.count(), 2)
+
+        # the manager should have a 'model' property pointing to the target model
+        self.assertEqual(Author, self.article.authors.model)
+
+        # Test adding to the relation
+        author_3 = Author.objects.create(name="Author 3")
+        self.article.authors.add(author_3)
+        self.assertEqual(
+            ['Author 1', 'Author 2', 'Author 3'],
+            [author.name for author in self.article.authors.all().order_by('name')]
+        )
+        self.assertEqual(self.article.authors.count(), 3)
+
+        # Test removing from the relation
+        self.article.authors.remove(author_3)
+        self.assertEqual(
+            ['Author 1', 'Author 2'],
+            [author.name for author in self.article.authors.order_by('name')]
+        )
+        self.assertEqual(self.article.authors.count(), 2)
+
+        # Test clearing the relation
+        self.article.authors.clear()
+        self.assertEqual(
+            [],
+            [author.name for author in self.article.authors.order_by('name')]
+        )
+        self.assertEqual(self.article.authors.count(), 0)
+
+        # Test the 'set' operation
+        self.article.authors.set([self.author_2])
+        self.assertEqual(self.article.authors.count(), 1)
+        self.assertEqual(
+            ['Author 2'],
+            [author.name for author in self.article.authors.order_by('name')]
+        )
+
+        # Test saving to / restoring from DB
+        self.article.authors = [self.author_1, self.author_2]
+        self.article.save()
+        self.article = Article.objects.get(title="Test Title")
+        self.assertEqual(
+            ['Author 1', 'Author 2'],
+            [author.name for author in self.article.authors.order_by('name')]
+        )
+        self.assertEqual(self.article.authors.count(), 2)
+
+    def test_constructor(self):
+        # Test passing values for M2M relations as kwargs to the constructor
+        article2 = Article(title="Test article 2",
+            authors=[self.author_1],
+            categories=[self.category_2],
+        )
+        self.assertEqual(
+            ['Author 1'],
+            [author.name for author in article2.authors.order_by('name')]
+        )
+        self.assertEqual(article2.authors.count(), 1)
+
+    def test_ordering(self):
+        # our fake querysets should respect the ordering defined on the target model
+        bela_bartok = Author.objects.create(name='Bela Bartok')
+        graham_greene = Author.objects.create(name='Graham Greene')
+        janis_joplin = Author.objects.create(name='Janis Joplin')
+        simon_sharma = Author.objects.create(name='Simon Sharma')
+        william_wordsworth = Author.objects.create(name='William Wordsworth')
+
+        article3 = Article(title="Test article 3")
+        article3.authors = [
+            janis_joplin, william_wordsworth, bela_bartok, simon_sharma, graham_greene
+        ]
+        self.assertEqual(
+            list(article3.authors.all()),
+            [bela_bartok, graham_greene, janis_joplin, simon_sharma, william_wordsworth]
+        )
+
+    def test_save_m2m_with_update_fields(self):
+        self.article.save()
+
+        # modify both relations, but only commit the change to authors
+        self.article.authors.clear()
+        self.article.categories.clear()
+        self.article.title = 'Updated title'
+        self.article.save(update_fields=['title', 'authors'])
+
+        self.updated_article = Article.objects.get(pk=self.article.pk)
+        self.assertEqual(self.updated_article.title, 'Updated title')
+        self.assertEqual(self.updated_article.authors.count(), 0)
+        self.assertEqual(self.updated_article.categories.count(), 2)
+
+    def test_reverse_m2m_field(self):
+        # article is unsaved, so should not be returned by the reverse relation on author
+        self.assertEqual(self.author_1.articles_by_author.count(), 0)
+
+        self.article.save()
+        # should now be able to look up on the reverse relation
+        self.assertEqual(self.author_1.articles_by_author.count(), 1)
+        self.assertEqual(self.author_1.articles_by_author.get(), self.article)
+
+        article_2 = Article(title="Test Title 2")
+        article_2.authors = [self.author_1]
+        article_2.save()
+        self.assertEqual(self.author_1.articles_by_author.all().count(), 2)
+        self.assertEqual(
+            list(self.author_1.articles_by_author.order_by('title').values_list('title', flat=True)),
+            ['Test Title', 'Test Title 2']
+        )
+
+    def test_value_from_object(self):
+        authors_field = Article._meta.get_field('authors')
+        self.assertEqual(
+            set(authors_field.value_from_object(self.article)),
+            set([self.author_1, self.author_2])
+        )
+        self.article.save()
+        self.assertEqual(
+            set(authors_field.value_from_object(self.article)),
+            set([self.author_1, self.author_2])
+        )

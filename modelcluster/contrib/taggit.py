@@ -1,12 +1,15 @@
 from __future__ import unicode_literals
 from __future__ import absolute_import
 
-from django.conf import settings
-from django.utils import six
+from taggit import VERSION as TAGGIT_VERSION
 from taggit.managers import TaggableManager, _TaggableManager
 from taggit.utils import require_instance_manager
 
 from modelcluster.queryset import FakeQuerySet
+
+
+if TAGGIT_VERSION < (0, 20, 0):
+    raise Exception("modelcluster.contrib.taggit requires django-taggit version 0.20 or above")
 
 
 class _ClusterTaggableManager(_TaggableManager):
@@ -17,7 +20,7 @@ class _ClusterTaggableManager(_TaggableManager):
         DeferringRelatedManager which allows writing related objects without committing them
         to the database.
         """
-        rel_name = self.through._meta.get_field('content_object').rel.get_accessor_name()
+        rel_name = self.through._meta.get_field('content_object').remote_field.get_accessor_name()
         return getattr(self.instance, rel_name)
 
     def get_queryset(self, extra_filters=None):
@@ -38,53 +41,7 @@ class _ClusterTaggableManager(_TaggableManager):
 
     @require_instance_manager
     def add(self, *tags):
-        # Add `tags` (which may be either strings or tag objects) to this instance's tag list.
-
-        # This implementation is a copy of taggit's own logic from _TaggableManager.add
-        # except for the final part that creates the 'through' objects (where we need to
-        # push them to the tagged_item manager, rather than creating them as DB objects).
-        # This is currently in sync with django-taggit master as of 2016-04-26:
-        # https://github.com/alex/django-taggit/tree/1daae6fc83009ef86cc62445537746a08aab91aa
-
-        # First turn the 'tags' list (which may be a mixture of tag objects and
-        # strings which may or may not correspond to existing tag objects)
-        # into 'tag_objs', a set of tag objects
-        str_tags = set()
-        tag_objs = set()
-        for t in tags:
-            if isinstance(t, self.through.tag_model()):
-                tag_objs.add(t)
-            elif isinstance(t, six.string_types):
-                str_tags.add(t)
-            else:
-                raise ValueError("Cannot add {0} ({1}). Expected {2} or str.".format(
-                    t, type(t), type(self.through.tag_model())))
-
-        if getattr(settings, 'TAGGIT_CASE_INSENSITIVE', False):
-            # Some databases can do case-insensitive comparison with IN, which
-            # would be faster, but we can't rely on it or easily detect it.
-            existing = []
-            tags_to_create = []
-
-            for name in str_tags:
-                try:
-                    tag = self.through.tag_model().objects.get(name__iexact=name)
-                    existing.append(tag)
-                except self.through.tag_model().DoesNotExist:
-                    tags_to_create.append(name)
-        else:
-            # If str_tags has 0 elements Django actually optimizes that to not do a
-            # query.  Malcolm is very smart.
-            existing = self.through.tag_model().objects.filter(
-                name__in=str_tags
-            )
-
-            tags_to_create = str_tags - set(t.name for t in existing)
-
-        tag_objs.update(existing)
-
-        for new_tag in tags_to_create:
-            tag_objs.add(self.through.tag_model().objects.create(name=new_tag))
+        tag_objs = self._to_tag_model_instances(tags)
 
         # Now write these to the relation
         tagged_item_manager = self.get_tagged_item_manager()
@@ -104,22 +61,33 @@ class _ClusterTaggableManager(_TaggableManager):
         tagged_item_manager.remove(*tagged_items)
 
     @require_instance_manager
+    def set(self, *tags, **kwargs):
+        # Ignore the 'clear' kwarg (which defaults to False) and override it to be always true;
+        # this means that set is implemented as a clear then an add, which was the standard behaviour
+        # prior to django-taggit 0.19 (https://github.com/alex/django-taggit/commit/6542a702b590a5cfb91ea0de218b7f71ffd07c33).
+        #
+        # In this way, we avoid a live database lookup that occurs in the clear=False branch.
+        #
+        # The clear=True behaviour is fine for our purposes; the distinction only exists in django-taggit
+        # to ensure that the correct set of m2m_changed signals is fired, and our reimplementation here
+        # doesn't fire them at all (which makes logical sense, because the whole point of this module is
+        # that the add/remove/set/clear operations don't write to the database).
+        return super(_ClusterTaggableManager, self).set(*tags, clear=True)
+
+    @require_instance_manager
     def clear(self):
         self.get_tagged_item_manager().clear()
 
 
 class ClusterTaggableManager(TaggableManager):
+    _need_commit_after_assignment = True
+
     def __get__(self, instance, model):
         # override TaggableManager's requirement for instance to have a primary key
         # before we can access its tags
-        try:
-            manager = _ClusterTaggableManager(
-                through=self.through, model=model, instance=instance, prefetch_cache_name=self.name
-            )
-        except TypeError:  # fallback for django-taggit pre 0.11
-            manager = _ClusterTaggableManager(
-                through=self.through, model=model, instance=instance
-            )
+        manager = _ClusterTaggableManager(
+            through=self.through, model=model, instance=instance, prefetch_cache_name=self.name
+        )
 
         return manager
 
@@ -127,5 +95,5 @@ class ClusterTaggableManager(TaggableManager):
         # retrieve the queryset via the related manager on the content object,
         # to accommodate the possibility of this having uncommitted changes relative to
         # the live database
-        rel_name = self.through._meta.get_field('content_object').rel.get_accessor_name()
+        rel_name = self.through._meta.get_field('content_object').remote_field.get_accessor_name()
         return getattr(instance, rel_name).all()

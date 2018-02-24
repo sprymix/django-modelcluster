@@ -3,10 +3,10 @@ from __future__ import unicode_literals
 from django.utils.six import text_type
 
 from django.test import TestCase
-from tests.models import Band, BandMember, Album, Restaurant
+from tests.models import Band, BandMember, Album, Restaurant, Article, Author, Document, Gallery
 from modelcluster.forms import ClusterForm
 from django.forms import Textarea, CharField
-from django.forms.widgets import TextInput
+from django.forms.widgets import TextInput, FileInput
 
 import datetime
 
@@ -492,8 +492,182 @@ class ClusterFormTest(TestCase):
             class Meta:
                 model = Restaurant
                 fields = ['name', 'tags', 'serves_hot_dogs', 'proprietor']
+                widgets = {
+                    'name': WidgetWithMedia
+                }
 
         form = FormWithWidgetMedia()
 
-        self.assertIn(text_type(form.media['js']), 'test.js')
-        self.assertIn(text_type(form.media['css']), 'test.css')
+        self.assertIn('test.js', text_type(form.media['js']))
+        self.assertIn('test.css', text_type(form.media['css']))
+
+    def test_widgets_with_media_on_child_form(self):
+        """
+        The media property of ClusterForm should pick up media defined on child forms too
+        """
+        class FancyTextInput(TextInput):
+            class Media:
+                js = ['fancy-text-input.js']
+
+        class FancyFileUploader(FileInput):
+            class Media:
+                js = ['fancy-file-uploader.js']
+
+        class FormWithWidgetMedia(ClusterForm):
+            class Meta:
+                model = Gallery
+                fields = ['title']
+                widgets = {
+                    'title': FancyTextInput,
+                }
+
+                formsets = {
+                    'images': {
+                        'fields': ['image'],
+                        'widgets': {'image': FancyFileUploader}
+                    }
+                }
+
+        form = FormWithWidgetMedia()
+
+        self.assertIn('fancy-text-input.js', text_type(form.media['js']))
+        self.assertIn('fancy-file-uploader.js', text_type(form.media['js']))
+
+    def test_is_multipart_on_parent_form(self):
+        """
+        is_multipart should be True if a field requiring multipart submission
+        exists on the parent form
+        """
+        class BandForm(ClusterForm):
+            class Meta:
+                model = Band
+                formsets = ['members']
+                fields = ['name']
+
+        class DocumentForm(ClusterForm):
+            class Meta:
+                model = Document
+                fields = ['title', 'file']
+
+        band_form = BandForm()
+        self.assertFalse(band_form.is_multipart())
+
+        document_form = DocumentForm()
+        self.assertTrue(document_form.is_multipart())
+
+    def test_is_multipart_on_child_form(self):
+        """
+        is_multipart should be True if a field requiring multipart submission
+        exists on the child form
+        """
+        class GalleryForm(ClusterForm):
+            class Meta:
+                model = Gallery
+                formsets = ['images']
+                fields = ['title']
+
+        gallery_form = GalleryForm()
+        self.assertTrue(gallery_form.is_multipart())
+
+    def test_unique_together(self):
+        class BandForm(ClusterForm):
+            class Meta:
+                model = Band
+                fields = ['name']
+
+        form = BandForm({
+            'name': "The Beatles",
+
+            'members-TOTAL_FORMS': 2,
+            'members-INITIAL_FORMS': 0,
+            'members-MAX_NUM_FORMS': 1000,
+
+            'members-0-name': 'John Lennon',
+            'members-0-id': '',
+
+            'members-1-name': 'John Lennon',
+            'members-1-id': '',
+
+            'albums-TOTAL_FORMS': 0,
+            'albums-INITIAL_FORMS': 0,
+            'albums-MAX_NUM_FORMS': 1000,
+        })
+        self.assertFalse(form.is_valid())
+
+
+class FormWithM2MTest(TestCase):
+    def setUp(self):
+        self.james_joyce = Author.objects.create(name='James Joyce')
+        self.charles_dickens = Author.objects.create(name='Charles Dickens')
+
+        self.article = Article.objects.create(
+            title='Test article',
+            authors=[self.james_joyce],
+        )
+
+    def test_render_form_with_m2m(self):
+        class ArticleForm(ClusterForm):
+            class Meta:
+                model = Article
+                fields = ['title', 'authors']
+
+        form = ArticleForm(instance=self.article)
+        html = form.as_p()
+        self.assertIn('Test article', html)
+
+        self.article.authors.add(self.charles_dickens)
+
+        form = ArticleForm(instance=self.article)
+        html = form.as_p()
+        self.assertIn('Test article', html)
+
+    def test_save_form_with_m2m(self):
+        class ArticleForm(ClusterForm):
+            class Meta:
+                model = Article
+                fields = ['title', 'authors']
+                formsets = []
+
+        form = ArticleForm({
+            'title': 'Updated test article',
+            'authors': [self.charles_dickens.id]
+        }, instance=self.article)
+        self.assertTrue(form.is_valid())
+        form.save()
+
+        # changes should take effect on both the in-memory instance and the database
+        self.assertEqual(self.article.title, 'Updated test article')
+        self.assertEqual(list(self.article.authors.all()), [self.charles_dickens])
+
+        updated_article = Article.objects.get(pk=self.article.pk)
+        self.assertEqual(updated_article.title, 'Updated test article')
+        self.assertEqual(list(updated_article.authors.all()), [self.charles_dickens])
+
+    def test_save_form_uncommitted_with_m2m(self):
+        class ArticleForm(ClusterForm):
+            class Meta:
+                model = Article
+                fields = ['title', 'authors']
+                formsets = []
+
+        form = ArticleForm({
+            'title': 'Updated test article',
+            'authors': [self.charles_dickens.id],
+        }, instance=self.article)
+        self.assertTrue(form.is_valid())
+        form.save(commit=False)
+
+        # the in-memory instance should have 'title' and 'authors' updated,
+        self.assertEqual(self.article.title, 'Updated test article')
+        self.assertEqual(list(self.article.authors.all()), [self.charles_dickens])
+
+        # the database record should be unchanged
+        db_article = Article.objects.get(pk=self.article.pk)
+        self.assertEqual(db_article.title, 'Test article')
+        self.assertEqual(list(db_article.authors.all()), [self.james_joyce])
+
+        # model.save commits the record to the db
+        self.article.save()
+        db_article = Article.objects.get(pk=self.article.pk)
+        self.assertEqual(db_article.title, 'Updated test article')
+        self.assertEqual(list(db_article.authors.all()), [self.charles_dickens])

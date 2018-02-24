@@ -1,12 +1,13 @@
 from __future__ import unicode_literals
 
+import django
+from django.forms import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS
 from django.utils.six import with_metaclass
-
 from django.forms.models import (
     BaseModelFormSet, modelformset_factory,
     ModelForm, _get_foreign_key, ModelFormMetaclass, ModelFormOptions
 )
-
 from django.db.models.fields.related import ForeignObjectRel
 
 
@@ -16,17 +17,21 @@ from modelcluster.models import get_all_child_relations
 class BaseTransientModelFormSet(BaseModelFormSet):
     """ A ModelFormSet that doesn't assume that all its initial data instances exist in the db """
     def _construct_form(self, i, **kwargs):
+        # Need to override _construct_form to avoid calling to_python on an empty string PK value
+
         if self.is_bound and i < self.initial_form_count():
-            pk_name = self.model._meta.pk.name
-            pk_key = "%s-%s" % (self.add_prefix(i), pk_name)
-            pk_val = self.data[pk_key]
-            if pk_val:
-                kwargs['instance'] = self.queryset.get(**{pk_name: pk_val})
-            else:
+            pk_key = "%s-%s" % (self.add_prefix(i), self.model._meta.pk.name)
+            pk = self.data[pk_key]
+            if pk == '':
                 kwargs['instance'] = self.model()
-        elif i < self.initial_form_count():
+            else:
+                pk_field = self.model._meta.pk
+                to_python = self._get_to_python(pk_field)
+                pk = to_python(pk)
+                kwargs['instance'] = self._existing_object(pk)
+        if i < self.initial_form_count() and 'instance' not in kwargs:
             kwargs['instance'] = self.get_queryset()[i]
-        elif self.initial_extra:
+        if i >= self.initial_form_count() and self.initial_extra:
             # Set initial values for extra forms
             try:
                 kwargs['initial'] = self.initial_extra[i - self.initial_form_count()]
@@ -36,6 +41,43 @@ class BaseTransientModelFormSet(BaseModelFormSet):
         # bypass BaseModelFormSet's own _construct_form
         return super(BaseModelFormSet, self)._construct_form(i, **kwargs)
 
+    def save_existing_objects(self, commit=True):
+        # Need to override _construct_form so that it doesn't skip over initial forms whose instance
+        # has a blank PK (which is taken as an indication that the form was constructed with an
+        # instance not present in our queryset)
+
+        self.changed_objects = []
+        self.deleted_objects = []
+        if not self.initial_forms:
+            return []
+
+        saved_instances = []
+        forms_to_delete = self.deleted_forms
+        for form in self.initial_forms:
+            obj = form.instance
+            if form in forms_to_delete:
+                if obj.pk is None:
+                    # no action to be taken to delete an object which isn't in the database
+                    continue
+                self.deleted_objects.append(obj)
+                self.delete_existing(obj, commit=commit)
+            elif form.has_changed():
+                self.changed_objects.append((obj, form.changed_data))
+                saved_instances.append(self.save_existing(form, obj, commit=commit))
+                if not commit:
+                    self.saved_forms.append(form)
+        return saved_instances
+
+    if django.VERSION < (1, 9):
+        def save_existing(self, form, instance, commit=True):
+            """Saves and returns an existing model instance for the given form."""
+            return form.save(commit=commit)
+
+        def delete_existing(self, obj, commit=True):
+            """Deletes an existing model instance."""
+            if commit:
+                obj.delete()
+
 
 def transientmodelformset_factory(model, formset=BaseTransientModelFormSet, **kwargs):
     return modelformset_factory(model, formset=formset, **kwargs)
@@ -44,11 +86,11 @@ def transientmodelformset_factory(model, formset=BaseTransientModelFormSet, **kw
 class BaseChildFormSet(BaseTransientModelFormSet):
     def __init__(self, data=None, files=None, instance=None, queryset=None, **kwargs):
         if instance is None:
-            self.instance = self.fk.rel.to()
+            self.instance = self.fk.remote_field.model()
         else:
             self.instance = instance
 
-        self.rel_name = ForeignObjectRel(self.fk, self.fk.rel.to, related_name=self.fk.rel.related_name).get_accessor_name()
+        self.rel_name = ForeignObjectRel(self.fk, self.fk.remote_field.model, related_name=self.fk.remote_field.related_name).get_accessor_name()
 
         if queryset is None:
             queryset = getattr(self.instance, self.rel_name).all()
@@ -82,17 +124,57 @@ class BaseChildFormSet(BaseTransientModelFormSet):
         manager.add(*saved_instances)
         manager.remove(*self.deleted_objects)
 
-        # ensure save_m2m is called even if commit = false. We don't fully support m2m fields yet,
-        # but if they perform save_form_data in a way that happens to play well with ClusterableModel
-        # (as taggit's manager does), we want that to take effect immediately, not just on db save
-        for form in self.saved_forms:
-            if hasattr(form, 'save_m2m'):
-                form.save_m2m()
-
+        self.save_m2m()  # ensures any parental-m2m fields are saved.
         if commit:
             manager.commit()
 
         return saved_instances
+
+    def clean(self, *args, **kwargs):
+        self.validate_unique()
+        return super(BaseChildFormSet, self).clean(*args, **kwargs)
+
+    def validate_unique(self):
+        '''This clean method will check for unique_together condition'''
+        # Collect unique_checks and to run from all the forms.
+        all_unique_checks = set()
+        all_date_checks = set()
+        forms_to_delete = self.deleted_forms
+        valid_forms = [form for form in self.forms if form.is_valid() and form not in forms_to_delete]
+        for form in valid_forms:
+            unique_checks, date_checks = form.instance._get_unique_checks()
+            all_unique_checks.update(unique_checks)
+            all_date_checks.update(date_checks)
+
+        errors = []
+        # Do each of the unique checks (unique and unique_together)
+        for uclass, unique_check in all_unique_checks:
+            seen_data = set()
+            for form in valid_forms:
+                # Get the data for the set of fields that must be unique among the forms.
+                row_data = (
+                    field if field in self.unique_fields else form.cleaned_data[field]
+                    for field in unique_check if field in form.cleaned_data
+                )
+                # Reduce Model instances to their primary key values
+                row_data = tuple(d._get_pk_val() if hasattr(d, '_get_pk_val') else d
+                                 for d in row_data)
+                if row_data and None not in row_data:
+                    # if we've already seen it then we have a uniqueness failure
+                    if row_data in seen_data:
+                        # poke error messages into the right places and mark
+                        # the form as invalid
+                        errors.append(self.get_unique_error_message(unique_check))
+                        form._errors[NON_FIELD_ERRORS] = self.error_class([self.get_form_error()])
+                        # remove the data from the cleaned_data dict since it was invalid
+                        for field in unique_check:
+                            if field in form.cleaned_data:
+                                del form.cleaned_data[field]
+                    # mark the data as seen
+                    seen_data.add(row_data)
+
+        if errors:
+            raise ValidationError(errors)
 
 
 def childformset_factory(
@@ -227,14 +309,57 @@ class ClusterForm(with_metaclass(ClusterFormMetaclass, ModelForm)):
         formsets_are_valid = all([formset.is_valid() for formset in self.formsets.values()])
         return form_is_valid and formsets_are_valid
 
-    def save(self, commit=True):
-        instance = super(ClusterForm, self).save(commit=commit)
+    def is_multipart(self):
+        return (
+            super(ClusterForm, self).is_multipart()
+            or any(formset.is_multipart() for formset in self.formsets.values())
+        )
 
-        # ensure save_m2m is called even if commit = false. We don't fully support m2m fields yet,
-        # but if they perform save_form_data in a way that happens to play well with ClusterableModel
-        # (as taggit's manager does), we want that to take effect immediately, not just on db save
-        if not commit:
+    @property
+    def media(self):
+        media = super(ClusterForm, self).media
+        for formset in self.formsets.values():
+            media = media + formset.media
+        return media
+
+    def save(self, commit=True):
+        # do we have any fields that expect us to call save_m2m immediately?
+        save_m2m_now = False
+        exclude = self._meta.exclude
+        fields = self._meta.fields
+
+        for f in self.instance._meta.get_fields():
+            if fields and f.name not in fields:
+                continue
+            if exclude and f.name in exclude:
+                continue
+            if getattr(f, '_need_commit_after_assignment', False):
+                save_m2m_now = True
+                break
+
+        instance = super(ClusterForm, self).save(commit=(commit and not save_m2m_now))
+
+        # The M2M-like fields designed for use with ClusterForm (currently
+        # ParentalManyToManyField and ClusterTaggableManager) will manage their own in-memory
+        # relations, and not immediately write to the database when we assign to them.
+        # For these fields (identified by the _need_commit_after_assignment
+        # flag), save_m2m() is a safe operation that does not affect the database and is thus
+        # valid for commit=False. In the commit=True case, committing to the database happens
+        # in the subsequent instance.save (so this needs to happen after save_m2m to ensure
+        # we have the updated relation data in place).
+
+        # For annoying legacy reasons we sometimes need to accommodate 'classic' M2M fields
+        # (particularly taggit.TaggableManager) within ClusterForm. These fields
+        # generally do require our instance to exist in the database at the point we call
+        # save_m2m() - for this reason, we only proceed with the customisation described above
+        # (i.e. postpone the instance.save() operation until after save_m2m) if there's a
+        # _need_commit_after_assignment field on the form that demands it.
+
+        if save_m2m_now:
             self.save_m2m()
+
+            if commit:
+                instance.save()
 
         for formset in self.formsets.values():
             formset.instance = instance

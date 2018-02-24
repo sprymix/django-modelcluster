@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 import json
 import datetime
 
+import django
 from django.db import models
 from django.db.models.fields.related import ForeignObjectRel
 from django.db.models.fields import FieldDoesNotExist
@@ -11,9 +12,11 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.conf import settings
 from django.utils import timezone
 
+from modelcluster.fields import ParentalKey, ParentalManyToManyField
+
 
 def get_field_value(field, model):
-    if field.rel is None:
+    if field.remote_field is None:
         value = field.pre_save(model, add=model.pk is None)
 
         # Make datetimes timezone aware
@@ -34,10 +37,14 @@ def get_field_value(field, model):
 
 
 def get_serializable_data_for_fields(model):
+    """
+    Return a serialised version of the model's fields which exist as local database
+    columns (i.e. excluding m2m and incoming foreign key relations)
+    """
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
-    while pk_field.rel and pk_field.rel.parent_link:
-        pk_field = pk_field.rel.to._meta.pk
+    while pk_field.remote_field and pk_field.remote_field.parent_link:
+        pk_field = pk_field.remote_field.model._meta.pk
 
     obj = {'pk': get_field_value(pk_field, model)}
 
@@ -51,8 +58,8 @@ def get_serializable_data_for_fields(model):
 def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
     pk_field = model._meta.pk
     # If model is a child via multitable inheritance, use parent's pk
-    while pk_field.rel and pk_field.rel.parent_link:
-        pk_field = pk_field.rel.to._meta.pk
+    while pk_field.remote_field and pk_field.remote_field.parent_link:
+        pk_field = pk_field.remote_field.model._meta.pk
 
     kwargs = {pk_field.attname: data['pk']}
     for field_name, field_value in data.items():
@@ -65,27 +72,29 @@ def model_from_serializable_data(model, data, check_fks=True, strict_fks=False):
         if isinstance(field, ForeignObjectRel):
             continue
 
-        if field.rel and isinstance(field.rel, models.ManyToManyRel):
-            raise Exception('m2m relations not supported yet')
-        elif field.rel and isinstance(field.rel, models.ManyToOneRel):
+        if field.remote_field and isinstance(field.remote_field, models.ManyToManyRel):
+            related_objects = field.remote_field.model._default_manager.filter(pk__in=field_value)
+            kwargs[field.attname] = list(related_objects)
+
+        elif field.remote_field and isinstance(field.remote_field, models.ManyToOneRel):
             if field_value is None:
                 kwargs[field.attname] = None
             else:
-                clean_value = field.rel.to._meta.get_field(field.rel.field_name).to_python(field_value)
+                clean_value = field.remote_field.model._meta.get_field(field.remote_field.field_name).to_python(field_value)
                 kwargs[field.attname] = clean_value
                 if check_fks:
                     try:
-                        field.rel.to._default_manager.get(**{field.rel.field_name: clean_value})
-                    except field.rel.to.DoesNotExist:
-                        if field.rel.on_delete == models.DO_NOTHING:
+                        field.remote_field.model._default_manager.get(**{field.remote_field.field_name: clean_value})
+                    except field.remote_field.model.DoesNotExist:
+                        if field.remote_field.on_delete == models.DO_NOTHING:
                             pass
-                        elif field.rel.on_delete == models.CASCADE:
+                        elif field.remote_field.on_delete == models.CASCADE:
                             if strict_fks:
                                 return None
                             else:
                                 kwargs[field.attname] = None
 
-                        elif field.rel.on_delete == models.SET_NULL:
+                        elif field.remote_field.on_delete == models.SET_NULL:
                             kwargs[field.attname] = None
 
                         else:
@@ -118,23 +127,27 @@ def get_all_child_relations(model):
     Return a list of RelatedObject records for child relations of the given model,
     including ones attached to ancestors of the model
     """
-    try:
-        return model._meta._child_relations_cache
-    except AttributeError:
-        relations = []
-        for parent in model._meta.get_parent_list():
-            try:
-                relations.extend(parent._meta.child_relations)
-            except AttributeError:
-                pass
+    if django.VERSION >= (1, 9):
+        return [
+            field for field in model._meta.get_fields()
+            if isinstance(field.remote_field, ParentalKey)
+        ]
+    else:
+        return [
+            field for field in model._meta.get_fields()
+            if isinstance(field, ForeignObjectRel) and isinstance(field.field, ParentalKey)
+        ]
 
-        try:
-            relations.extend(model._meta.child_relations)
-        except AttributeError:
-            pass
 
-        model._meta._child_relations_cache = relations
-        return relations
+def get_all_child_m2m_relations(model):
+    """
+    Return a list of ParentalManyToManyFields on the given model,
+    including ones attached to ancestors of the model
+    """
+    return [
+        field for field in model._meta.get_fields()
+        if isinstance(field, ParentalManyToManyField)
+    ]
 
 
 class ClusterableModel(models.Model):
@@ -143,15 +156,14 @@ class ClusterableModel(models.Model):
         Extend the standard model constructor to allow child object lists to be passed in
         via kwargs
         """
-        child_relation_names = [rel.get_accessor_name() for rel in get_all_child_relations(self)]
+        child_relation_names = (
+            [rel.get_accessor_name() for rel in get_all_child_relations(self)] +
+            [field.name for field in get_all_child_m2m_relations(self)]
+        )
 
-        is_passing_child_relations = False
-        for rel_name in child_relation_names:
-            if rel_name in kwargs:
-                is_passing_child_relations = True
-                break
-
-        if is_passing_child_relations:
+        if any(name in kwargs for name in child_relation_names):
+            # One or more child relation values is being passed in the constructor; need to
+            # separate these from the standard field kwargs to be passed to 'super'
             kwargs_for_super = kwargs.copy()
             relation_assignments = {}
             for rel_name in child_relation_names:
@@ -169,17 +181,22 @@ class ClusterableModel(models.Model):
         Save the model and commit all child relations.
         """
         child_relation_names = [rel.get_accessor_name() for rel in get_all_child_relations(self)]
+        child_m2m_field_names = [field.name for field in get_all_child_m2m_relations(self)]
 
         update_fields = kwargs.pop('update_fields', None)
         if update_fields is None:
             real_update_fields = None
             relations_to_commit = child_relation_names
+            m2m_fields_to_commit = child_m2m_field_names
         else:
             real_update_fields = []
             relations_to_commit = []
+            m2m_fields_to_commit = []
             for field in update_fields:
                 if field in child_relation_names:
                     relations_to_commit.append(field)
+                elif field in child_m2m_field_names:
+                    m2m_fields_to_commit.append(field)
                 else:
                     real_update_fields.append(field)
 
@@ -188,11 +205,13 @@ class ClusterableModel(models.Model):
         for relation in relations_to_commit:
             getattr(self, relation).commit()
 
+        for field in m2m_fields_to_commit:
+            getattr(self, field).commit()
+
     def serializable_data(self):
         obj = get_serializable_data_for_fields(self)
-        child_relations = get_all_child_relations(self)
 
-        for rel in child_relations:
+        for rel in get_all_child_relations(self):
             rel_name = rel.get_accessor_name()
             children = getattr(self, rel_name).all()
 
@@ -200,6 +219,10 @@ class ClusterableModel(models.Model):
                 obj[rel_name] = [child.serializable_data() for child in children]
             else:
                 obj[rel_name] = [get_serializable_data_for_fields(child) for child in children]
+
+        for field in get_all_child_m2m_relations(self):
+            children = getattr(self, field.name).all()
+            obj[field.name] = [child.pk for child in children]
 
         return obj
 

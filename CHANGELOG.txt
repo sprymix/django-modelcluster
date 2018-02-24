@@ -1,6 +1,39 @@
 Changelog
 =========
 
+4.1 (12.02.2017)
+~~~~~~~~~~~~~~~~
+* `on_delete` on ParentalKey now defaults to CASCADE if not specified
+
+4.0 (13.12.2017)
+~~~~~~~~~~~~~~~~
+* Django 2.0 compatibility
+* Removed Django 1.8 and 1.9 support
+* Child formsets now validate uniqueness constraints
+* Fix: Many-to-many relations inside inline formsets are now saved correctly
+
+3.1 (07.04.2017)
+~~~~~~~~~~~~~~~~
+* Django 1.11 compatibility
+* Python 3.6 compatibility
+* Added the ability to install the optional dependency `django-taggit`
+  using `pip install django-modelcluster[taggit]`
+* Fix: ClusterForm.save(commit=True) now correctly writes ParentalManyToManyField relations back to the database rather than requiring a separate model.save() step
+* Fix: ClusterForm.is_multipart() now returns True when a child form requires multipart submission
+* Fix: ClusterForm.media now includes media defined on child forms
+* Fix: ParentalManyToManyField.value_from_object now returns correct result on unsaved objects
+
+3.0.1 (02.02.2017)
+~~~~~~~~~~~~~~~~~~
+* Fix: Added _result_cache property on FakeQuerySet (necessary for model forms with ParentalManyToManyFields to work correctly on Django 1.8-1.9)
+
+3.0 (02.02.2017)
+~~~~~~~~~~~~~~~~
+* Added support for many-to-many relations (Thejaswi Puthraya, Matt Westcott)
+* Added compatibility with django-taggit 0.20 and dropped support for earlier versions
+* Deprecated the Model._meta.child_relations property (get_all_child_relations should be used instead)
+* Implemented the `set()` method on related managers (introduced in Django 1.9)
+
 2.0 (22.04.2016)
 ~~~~~~~~~~~~~~~~
 * Removed Django 1.7 and Python 3.2 support
